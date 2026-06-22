@@ -813,7 +813,208 @@
 // Ganti dengan URL deployment GAS Anda setelah deploy
 const GAS_URL = 'https://script.google.com/macros/s/AKfycbzuMGI_d2cqYiWyo7BrwfO7A1yfDuZFwV8XIoLuBvqRBIb_JbArY-XyYHDRIAdL1n6l7A/exec';
 // Contoh: 'https://script.google.com/macros/s/AKfycb.../exec'
+
+async function initCloudSync() {
+  if (!GAS_URL || GAS_URL.includes('GANTI_DENGAN')) return;
  
+  const localEmpty = childrenData.length === 0;
+ 
+  if (localEmpty) {
+    // Device baru / localStorage bersih → wajib load dari cloud
+    showCloudLoadingOverlay(true);
+    await loadFromGAS();
+    showCloudLoadingOverlay(false);
+  } else {
+    // Ada data lokal → tetap sync diam-diam di background
+    // untuk memastikan data terbaru dari device lain ikut masuk
+    syncFromGASBackground();
+  }
+}
+
+ 
+// ============================================================
+// LOAD DATA DARI GAS (blocking - ditunggu sampai selesai)
+// ============================================================
+async function loadFromGAS() {
+  updateSyncStatus('syncing');
+  try {
+    const url      = GAS_URL + '?action=load_all&t=' + Date.now();
+    const response = await fetch(url);
+    const result   = await response.json();
+ 
+    if (result.status === 'ok' && Array.isArray(result.data) && result.data.length > 0) {
+      childrenData = result.data;
+      activeChildId = childrenData[0].id;
+ 
+      // Simpan ke localStorage agar device ini punya cache lokal
+      localStorage.setItem('gt_children', JSON.stringify(childrenData));
+      localStorage.setItem('gt_active_child_id', activeChildId);
+ 
+      // Re-render semua UI
+      renderDashboard();
+      updateActiveChildBanner();
+      loadActiveChildData();
+ 
+      updateSyncStatus('success');
+      alertToast('Data berhasil dimuat dari Spreadsheet cloud ☁️');
+    } else if (result.data && result.data.length === 0) {
+      updateSyncStatus('idle');
+      alertToast('Spreadsheet masih kosong, mulai tambah profil anak.', 'warning');
+    } else {
+      throw new Error(result.message || 'Respons tidak valid');
+    }
+  } catch (err) {
+    console.error('loadFromGAS error:', err);
+    updateSyncStatus('error');
+    alertToast('Gagal memuat dari cloud: ' + err.message, 'error');
+  }
+}
+ 
+// ============================================================
+// SYNC BACKGROUND: Jalankan di belakang tanpa blokir UI
+// Merge data cloud ke lokal jika ada data baru dari device lain
+// ============================================================
+async function syncFromGASBackground() {
+  if (!GAS_URL || GAS_URL.includes('GANTI_DENGAN')) return;
+  try {
+    const url    = GAS_URL + '?action=load_all&t=' + Date.now();
+    const res    = await fetch(url);
+    const result = await res.json();
+ 
+    if (result.status !== 'ok' || !Array.isArray(result.data)) return;
+ 
+    let changed = false;
+ 
+    result.data.forEach(cloudChild => {
+      const localChild = childrenData.find(c => c.id === cloudChild.id);
+ 
+      if (!localChild) {
+        // Anak baru dari device lain, tambahkan
+        childrenData.push(cloudChild);
+        changed = true;
+        return;
+      }
+ 
+      // Merge pengukuran: tambah yang belum ada di lokal
+      cloudChild.measurements.forEach(cm => {
+        const exists = localChild.measurements.find(lm => lm.id === cm.id);
+        if (!exists) {
+          localChild.measurements.push(cm);
+          localChild.measurements.sort((a, b) => new Date(a.date) - new Date(b.date));
+          changed = true;
+        }
+      });
+ 
+      // Merge catatan harian: tambah yang belum ada di lokal
+      cloudChild.dailyNotes.forEach(cn => {
+        const exists = (localChild.dailyNotes || []).find(ln => ln.id === cn.id);
+        if (!exists) {
+          if (!localChild.dailyNotes) localChild.dailyNotes = [];
+          localChild.dailyNotes.push(cn);
+          localChild.dailyNotes.sort((a, b) => new Date(b.date) - new Date(a.date));
+          changed = true;
+        }
+      });
+    });
+ 
+    if (changed) {
+      localStorage.setItem('gt_children', JSON.stringify(childrenData));
+      renderDashboard();
+      updateActiveChildBanner();
+      loadActiveChildData();
+      alertToast('Data terbaru dari cloud berhasil digabungkan ☁️');
+    }
+ 
+  } catch (err) {
+    // Background sync gagal = tidak perlu notifikasi user
+    console.warn('Background sync gagal:', err);
+  }
+}
+ 
+// ============================================================
+// OVERLAY LOADING saat pertama kali load dari cloud
+// Mencegah user melihat halaman kosong sementara data ditarik
+// ============================================================
+function showCloudLoadingOverlay(show) {
+  let overlay = document.getElementById('cloud-loading-overlay');
+ 
+  if (show) {
+    if (overlay) return;
+    overlay = document.createElement('div');
+    overlay.id = 'cloud-loading-overlay';
+    overlay.style.cssText = `
+      position: fixed; inset: 0; z-index: 9999;
+      background: rgba(248,250,252,0.96);
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center; gap: 16px;
+    `;
+    overlay.innerHTML = `
+      <div style="
+        width: 64px; height: 64px; border-radius: 20px;
+        background: #0ea5e9; display: flex; align-items: center;
+        justify-content: center; box-shadow: 0 8px 24px rgba(14,165,233,0.3);
+      ">
+        <i class="fa-solid fa-cloud-arrow-down text-white text-2xl"></i>
+      </div>
+      <div style="text-align: center;">
+        <p style="font-weight: 800; font-size: 16px; color: #0f172a; margin: 0 0 4px;">
+          Memuat Data dari Cloud...
+        </p>
+        <p style="font-size: 13px; color: #64748b; margin: 0;">
+          Mohon tunggu, sedang mengambil data dari Spreadsheet
+        </p>
+      </div>
+      <div style="
+        width: 200px; height: 4px; background: #e2e8f0;
+        border-radius: 99px; overflow: hidden;
+      ">
+        <div style="
+          height: 100%; width: 40%; background: #0ea5e9;
+          border-radius: 99px;
+          animation: loadbar 1.2s ease-in-out infinite alternate;
+        "></div>
+      </div>
+      <style>
+        @keyframes loadbar {
+          from { transform: translateX(-60%); }
+          to   { transform: translateX(260%); }
+        }
+      </style>
+    `;
+    document.body.appendChild(overlay);
+  } else {
+    if (overlay) {
+      overlay.style.opacity = '0';
+      overlay.style.transition = 'opacity 0.3s';
+      setTimeout(() => overlay.remove(), 300);
+    }
+  }
+}
+
+ 
+// ============================================================
+// TOMBOL MANUAL: "Muat dari Cloud"
+// Inject tombol ini ke navbar (dipanggil di window.onload)
+// ============================================================
+function initCloudLoadButton() {
+  const restoreInput = document.getElementById('restoreFile');
+  if (!restoreInput) return;
+ 
+  const btn = document.createElement('button');
+  btn.id        = 'btn-load-cloud';
+  btn.title     = 'Muat ulang data dari Spreadsheet';
+  btn.className = 'p-2.5 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors text-slate-600 dark:text-slate-300';
+  btn.innerHTML = '<i class="fa-solid fa-cloud-arrow-down text-lg"></i>';
+  btn.onclick   = async () => {
+    if (confirm('Muat ulang semua data dari Google Spreadsheet?\n\nData lokal akan digabung dengan data cloud.')) {
+      await loadFromGAS();
+    }
+  };
+ 
+  // Sisipkan setelah tombol restore file
+  restoreInput.insertAdjacentElement('afterend', btn);
+}
+        
 // Flag: apakah sedang dalam proses sync (cegah double-sync)
 let isSyncing = false;
  
@@ -907,6 +1108,9 @@ function updateSyncStatus(status) {
             renderDashboard();
             updateActiveChildBanner();
             loadActiveChildData();
+            initCloudLoadButton();
+            initCloudSync();
+            
         }
 
         // --- THEME & UTILITIES ---
