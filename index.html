@@ -93,6 +93,8 @@
                         <i class="fa-solid fa-cloud-arrow-down text-lg"></i>
                     </button>
                     <input type="file" id="restoreFile" class="hidden" accept=".json" onchange="restoreData(event)">
+                    <button id="gas-sync-indicator" onclick="syncToGAS('sync_all')"  class="p-2.5 rounded-xl transition-colors text-slate-400" 
+                        title="Sinkronkan ke Spreadsheet"><i class="fa-solid fa-cloud text-lg"></i></button>
                 </div>
             </div>
         </div>
@@ -802,6 +804,87 @@
         let childrenData = JSON.parse(localStorage.getItem('gt_children')) || [];
         let activeChildId = localStorage.getItem('gt_active_child_id') || "";
 
+        // ============================================================
+// PATCH: Tambahkan kode ini ke dalam blok <script> di HTML
+// Letakkan SETELAH baris:  let activeChildId = ...
+// ============================================================
+ 
+// --- KONFIGURASI GAS ---
+// Ganti dengan URL deployment GAS Anda setelah deploy
+const GAS_URL = 'https://script.google.com/macros/s/AKfycbzuMGI_d2cqYiWyo7BrwfO7A1yfDuZFwV8XIoLuBvqRBIb_JbArY-XyYHDRIAdL1n6l7A/exec';
+// Contoh: 'https://script.google.com/macros/s/AKfycb.../exec'
+ 
+// Flag: apakah sedang dalam proses sync (cegah double-sync)
+let isSyncing = false;
+ 
+// ============================================================
+// FUNGSI UTAMA: Kirim data ke GAS Spreadsheet
+// Dipanggil setiap kali saveData() dieksekusi
+// ============================================================
+async function syncToGAS(action = 'sync_all', specificData = null) {
+  // Jangan sync jika URL belum diset
+  if (!GAS_URL || GAS_URL.includes('GANTI_DENGAN')) return;
+  if (isSyncing) return;
+ 
+  isSyncing = true;
+  updateSyncStatus('syncing');
+ 
+  try {
+    let payload;
+ 
+    if (action === 'sync_all') {
+      payload = { action: 'sync_all', data: childrenData };
+    } else {
+      payload = { action, data: specificData };
+    }
+ 
+    const response = await fetch(GAS_URL, {
+      method: 'POST',
+      // GAS tidak support preflight CORS, gunakan no-cors
+      // Data tetap terkirim, tapi response tidak bisa dibaca (opaque)
+      mode: 'no-cors',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+ 
+    // Karena mode: no-cors, kita tidak bisa baca response body
+    // Tapi jika tidak ada network error, berarti request terkirim
+    updateSyncStatus('success');
+    
+  } catch (err) {
+    console.error('GAS Sync gagal:', err);
+    updateSyncStatus('error');
+  } finally {
+    isSyncing = false;
+  }
+}
+ 
+// ============================================================
+// Indikator status sync di navbar
+// ============================================================
+function updateSyncStatus(status) {
+  // Cari elemen indikator (kita akan inject ke navbar)
+  let indicator = document.getElementById('gas-sync-indicator');
+  if (!indicator) return;
+ 
+  const states = {
+    idle:    { icon: 'fa-cloud',            color: 'text-slate-400',  title: 'Terhubung ke Spreadsheet' },
+    syncing: { icon: 'fa-arrows-rotate fa-spin', color: 'text-sky-500', title: 'Menyinkronkan data...' },
+    success: { icon: 'fa-cloud-check',       color: 'text-emerald-500', title: 'Data tersimpan di Spreadsheet' },
+    error:   { icon: 'fa-cloud-exclamation', color: 'text-rose-500',   title: 'Gagal sync ke Spreadsheet' }
+  };
+ 
+  const s = states[status] || states.idle;
+  indicator.className = `p-2.5 rounded-xl transition-colors ${s.color}`;
+  indicator.querySelector('i').className = `fa-solid ${s.icon} text-lg`;
+  indicator.title = s.title;
+ 
+  // Reset ke idle setelah 4 detik jika success
+  if (status === 'success') {
+    setTimeout(() => updateSyncStatus('idle'), 4000);
+  }
+}
+
         // Instansiasi Chart Global
         let chartWFAInstance = null;
         let chartHFAInstance = null;
@@ -947,9 +1030,15 @@
 
         // --- DATABASE OPERATIONS ---
         function saveData() {
-            localStorage.setItem('gt_children', JSON.stringify(childrenData));
-            localStorage.setItem('gt_active_child_id', activeChildId);
-        }
+  // Simpan ke localStorage seperti biasa
+  localStorage.setItem('gt_children', JSON.stringify(childrenData));
+  localStorage.setItem('gt_active_child_id', activeChildId);
+  
+  // Tambahan: Sinkronkan ke GAS Spreadsheet secara async
+  // Tidak memblokir UI karena async
+  syncToGAS('sync_all');
+}
+ 
 
         function openAddChildModal(id = null) {
             document.getElementById('addChildModal').classList.remove('hidden');
@@ -1066,6 +1155,8 @@
                 alertToast("Profil anak telah terhapus.", "warning");
             }
         }
+
+        
 
         // --- CALCULATIONS & STATS ---
         function calculateAge(dob, targetDateStr = null) {
@@ -1240,6 +1331,20 @@
             });
         }
 
+        function initGASSyncButton() {
+  const restoreInput = document.getElementById('restoreFile');
+  if (!restoreInput) return;
+ 
+  const btn = document.createElement('button');
+  btn.id        = 'gas-sync-indicator';
+  btn.title     = 'Sinkronkan ke Spreadsheet';
+  btn.className = 'p-2.5 rounded-xl transition-colors text-slate-400';
+  btn.onclick   = () => syncToGAS('sync_all');
+  btn.innerHTML = '<i class="fa-solid fa-cloud text-lg"></i>';
+ 
+  restoreInput.insertAdjacentElement('afterend', btn);
+}
+
         // Peta dropdown & set banner anak terpilih
         function updateActiveChildBanner() {
             const banner = document.getElementById('activeChildBanner');
@@ -1331,6 +1436,8 @@
             activeChild.measurements.sort((a,b) => new Date(a.date) - new Date(b.date));
 
             saveData();
+            const activeChild2 = childrenData.find(c => c.id === activeChildId);
+            syncToGAS('sync_measurement', { childId: activeChildId, childName: activeChild2.nickname, measurement: measure });
             alertToast("Pengukuran fisik berhasil disimpan!");
             document.getElementById('growthForm').reset();
             const todayStr = new Date().toISOString().split('T')[0];
@@ -1338,6 +1445,7 @@
             
             renderDashboard();
             loadActiveChildData();
+            initGASSyncButton();
         }
 
         function deleteMeasurement(measureId) {
@@ -1384,6 +1492,8 @@
             activeChild.dailyNotes.sort((a,b) => new Date(b.date) - new Date(a.date)); // descending terbaru diatas
 
             saveData();
+            const activeChildNote = childrenData.find(c => c.id === activeChildId);
+            syncToGAS('sync_daily', { childId: activeChildId, childName: activeChildNote.nickname, note });
             alertToast("Catatan harian berhasil disimpan!");
             document.getElementById('dailyForm').reset();
             const todayStr = new Date().toISOString().split('T')[0];
